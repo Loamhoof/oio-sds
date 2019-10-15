@@ -19,13 +19,16 @@ from oio.xcute.common.dispatcher import XcuteDispatcher
 
 class Tester(XcuteAction):
 
-    def process(self, *args, **kwargs):
-        self.logger.error('sa marche (args=%s ; kwargs=%s) !!!', args, kwargs)
+    def process(self, item, **kwargs):
+        self.logger.error('It works (item=%s ; kwargs=%s) !!!',
+                          item, str(kwargs))
 
 
 class TesterDispatcher(XcuteDispatcher):
 
+    DEFAULT_TASK_TYPE = 'tester'
+
     def _get_actions_with_args(self):
         for i in range(10):
-            yield (Tester, ['coucou', 'hibou', i],
+            yield (Tester, 'myitem-' + str(i),
                    {'coucou': 'hibou', 'hibou': i})
