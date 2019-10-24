@@ -13,13 +13,26 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.
 
+from oio.xcute.common.task import XcuteTask
 
-class XcuteTask(object):
-    """Serialisable wrapper for an task submitted in the xcute hub."""
 
-    def __init__(self, conf, logger):
-        self.conf = conf
-        self.logger = logger
+class TesterFirstTask(XcuteTask):
 
-    def process(self, payload, **kwargs):
-        raise NotImplementedError()
+    def process(self, payload):
+        self.logger.info('First task: %s', payload['msg'])
+        return True
+
+
+class TesterSecondTask(XcuteTask):
+
+    def process(self, payload):
+        self.logger.info('Second task: %s', payload['msg'])
+        return True
+
+
+def tester_job(job_conf, marker=0, **kwargs):
+    for i in range(marker + 1, 5):
+        if i < 2:
+            yield (TesterFirstTask, {'msg': 'coucou-%d' % i}, None)
+        else:
+            yield (TesterSecondTask, {'msg': 'hibou-%d' % i}, 4)
