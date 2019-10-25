@@ -59,6 +59,7 @@ class XcuteJob(object):
         self.processed_items = 0
         self.errors = 0
         self.expected_items = None
+        self.lock = None
         if job_info is None:
             self.job_id = uuid()
             self.job_conf = dict()
@@ -70,10 +71,8 @@ class XcuteJob(object):
             self._load_job_info(job_info)
             self.job_conf = self.backend.get_job_config(self.job_id)
 
-        # Speed
-        self.max_items_per_second = int_value(
-            self.job_conf.get('items_per_second', None),
-            self.DEFAULT_ITEM_PER_SECOND)
+        # Parse job config
+        self._parse_job_config()
 
         # Beanstalkd
         conscience_client = ConscienceClient(self.conf)
@@ -125,7 +124,7 @@ class XcuteJob(object):
         if job_info is None:
             self.backend.start_job(
                 self.job_id, conf=self.job_conf, job_type=self.JOB_TYPE,
-                mtime=mtime)
+                mtime=mtime, lock=self.lock)
         else:
             self.backend.resume_job(self.job_id, mtime=mtime)
         self.sending_job_info = True
@@ -138,6 +137,12 @@ class XcuteJob(object):
         self.processed_items = int(job_info['processed_items'])
         self.errors = int(job_info['errors'])
         self.expected_items = job_info.get('expected_items')
+        self.lock = job_info.get('lock')
+
+    def _parse_job_config(self):
+        self.max_items_per_second = int_value(
+            self.job_conf.get('items_per_second', None),
+            self.DEFAULT_ITEM_PER_SECOND)
 
     def _get_all_available_beanstalkd(self, conscience_client):
         """

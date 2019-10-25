@@ -33,6 +33,10 @@ class TesterJob(XcuteJob):
 
     JOB_TYPE = 'tester'
 
+    def _parse_job_config(self):
+        super(TesterJob, self)._parse_job_config()
+        self.lock = self.job_conf.get('lock')
+
     def _get_tasks_with_args(self):
         start_index = 0
         if self.last_item_sent is not None:
