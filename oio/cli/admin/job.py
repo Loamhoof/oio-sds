@@ -20,6 +20,36 @@ from oio.cli import Command, Lister, ShowOne
 from oio.xcute.common.manager import XcuteManager
 
 
+def _flat_dict_from_dict(parsed_args, dict_):
+    """
+    Create a dictionary without depth.
+
+    {
+        'depth0': {
+            'depth1': {
+                'depth2': 'test'
+            }
+        }
+    }
+    =>
+    {
+        'depth0.depth1.depth2': 'test'
+    }
+    """
+    flat_dict = dict()
+    for key, value in dict_.items():
+        if not isinstance(value, dict):
+            if isinstance(value, list) and parsed_args.formatter == 'table':
+                value = '\n'.join(value)
+            flat_dict[key] = value
+            continue
+
+        _flat_dict = _flat_dict_from_dict(parsed_args, value)
+        for _key, _value in _flat_dict.items():
+            flat_dict[key + '.' + _key] = _value
+    return flat_dict
+
+
 class JobCommand(object):
 
     _manager = None
@@ -44,11 +74,13 @@ class JobList(JobCommand, Lister):
 
     def _take_action(self, parsed_args):
         jobs = self.manager.list_jobs()
-        for job in jobs:
-            yield (job['job_id'], job['status'], job['job_type'],
-                   job.get('lock', ''),
-                   datetime.utcfromtimestamp(float(job['ctime'])),
-                   datetime.utcfromtimestamp(float(job['mtime'])))
+        for job_info in jobs:
+            job_job = job_info['job']
+            job_time = job_info['time']
+            yield (job_job['id'], job_job['status'], job_job['type'],
+                   job_job.get('lock', ''),
+                   datetime.utcfromtimestamp(float(job_time['ctime'])),
+                   datetime.utcfromtimestamp(float(job_time['mtime'])))
 
     def take_action(self, parsed_args):
         self.logger.debug('take_action(%s)', parsed_args)
@@ -72,10 +104,15 @@ class JobShow(JobCommand, ShowOne):
     def take_action(self, parsed_args):
         self.logger.debug('take_action(%s)', parsed_args)
 
-        job = self.manager.show_job(parsed_args.job_id)
-        job['ctime'] = datetime.utcfromtimestamp(float(job['ctime']))
-        job['mtime'] = datetime.utcfromtimestamp(float(job['mtime']))
-        return zip(*sorted(job.items()))
+        job_info = self.manager.show_job(parsed_args.job_id)
+        if parsed_args.formatter == 'table':
+            job_time = job_info['time']
+            job_time['ctime'] = datetime.utcfromtimestamp(
+                float(job_time['ctime']))
+            job_time['mtime'] = datetime.utcfromtimestamp(
+                float(job_time['mtime']))
+        return zip(*sorted(
+            _flat_dict_from_dict(parsed_args, job_info).items()))
 
 
 class JobPause():
@@ -143,27 +180,7 @@ class JobDelete(JobCommand, Lister):
         return self.columns, self._take_action(parsed_args)
 
 
-class JobGetConfig(JobCommand, ShowOne):
-    """
-    Get configuration of the job
-    """
-
-    def get_parser(self, prog_name):
-        parser = super(JobGetConfig, self).get_parser(prog_name)
-        parser.add_argument(
-            'job_id',
-            metavar='<job_id>',
-            help=("Job ID to use"))
-        return parser
-
-    def take_action(self, parsed_args):
-        self.logger.debug('take_action(%s)', parsed_args)
-
-        return zip(*sorted(
-            self.manager.get_job_config(parsed_args.job_id).items()))
-
-
-class JobGetLocks(JobCommand, Lister):
+class JobLocks(JobCommand, Lister):
     """
     Get all the locks used.
     """

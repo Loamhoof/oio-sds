@@ -5,6 +5,7 @@ import signal
 import sys
 
 from oio.cli import make_logger_args_parser, get_logger_from_args
+from oio.xcute.common.manager import XcuteManager
 from oio.xcute.tester import TesterJob
 
 
@@ -25,14 +26,18 @@ def make_arg_parser():
 if __name__ == '__main__':
     args = make_arg_parser().parse_args()
     logger = get_logger_from_args(args)
+    job_info = {
+        'job': {
+            'type': TesterJob.JOB_TYPE
+        },
+        'config': {
+            'job_lock': args.lock,
+            'error_percentage': args.error_percentage
+        }
+    }
 
-    conf = {'namespace': args.namespace}
-    conf['redis_host'] = '127.0.0.1:6379'
-    conf['job_test'] = 'job_config'
-    conf['job_lock'] = args.lock
-    conf['job_error_percentage'] = args.error_percentage
-
-    job = TesterJob(conf, logger=logger)
+    manager = XcuteManager(logger=logger)
+    job = manager.create_job(job_info)
 
     def exit_gracefully(signum, frame):
         job.exit_gracefully()

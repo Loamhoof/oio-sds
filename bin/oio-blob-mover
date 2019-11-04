@@ -21,6 +21,7 @@ import signal
 import sys
 
 from oio.cli import make_logger_args_parser, get_logger_from_args
+from oio.xcute.common.manager import XcuteManager
 from oio.xcute.blob_mover import RawxDecommissionJob
 
 
@@ -49,6 +50,10 @@ def make_arg_parser():
         help='Timeout for rdir operations, in seconds. (default=%f).'
              % RawxDecommissionJob.DEFAULT_RDIR_TIMEOUT)
     parser.add_argument(
+        '--rawx-timeout', type=float,
+        help='Timeout for rawx operations, in seconds. (default=%f).'
+             % RawxDecommissionJob.DEFAULT_RAWX_TIMEOUT)
+    parser.add_argument(
         '--min-chunk-size', type=int,
         help='Only move chunks larger than the given size.')
     parser.add_argument(
@@ -64,21 +69,24 @@ def make_arg_parser():
 if __name__ == '__main__':
     args = make_arg_parser().parse_args()
     logger = get_logger_from_args(args)
+    job_info = {
+        'job': {
+            'type': RawxDecommissionJob.JOB_TYPE
+        },
+        'config': {
+            'items_per_second': args.items_per_second,
+            'service_id': args.service_id,
+            'rdir_fetch_limit': args.rdir_fetch_limit,
+            'rdir_timeout': args.rdir_timeout,
+            'rawx_timeout': args.rawx_timeout,
+            'min_chunk_size': args.min_chunk_size,
+            'max_chunk_size': args.max_chunk_size,
+            'excluded_rawx': args.excluded_rawx
+        }
+    }
 
-    conf = dict()
-    conf['namespace'] = args.namespace
-    # redis
-    conf['redis_host'] = '127.0.0.1:6379'
-    # job
-    conf['job_items_per_second'] = args.items_per_second
-    conf['job_service_id'] = args.service_id
-    conf['job_rdir_fetch_limit'] = args.rdir_fetch_limit
-    conf['job_rdir_timeout'] = args.rdir_timeout
-    conf['job_min_chunk_size'] = args.min_chunk_size
-    conf['job_max_chunk_size'] = args.max_chunk_size
-    conf['job_excluded_rawx'] = args.excluded_rawx
-
-    job = RawxDecommissionJob(conf, logger=logger)
+    manager = XcuteManager(logger=logger)
+    job = manager.create_job(job_info)
 
     def exit_gracefully(signum, frame):
         job.exit_gracefully()

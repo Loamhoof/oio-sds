@@ -43,7 +43,7 @@ class XcuteJob(object):
     DEFAULT_ITEM_PER_SECOND = 30
     DEFAULT_DISPATCHER_TIMEOUT = 300
 
-    def __init__(self, conf, job_info=None, logger=None):
+    def __init__(self, conf, job_info, resume=False, logger=None):
         self.conf = conf
         self.logger = logger or get_logger(self.conf)
         self.running = True
@@ -56,48 +56,29 @@ class XcuteJob(object):
         self.backend = XcuteBackend(self.conf)
 
         # Job info / config
+        self.job_info = job_info or dict()
         self.job_id = None
-        self.last_item_sent = None
-        self.processed_items = 0
-        self.errors = 0
+        self.items_last_sent = None
+        self.items_processed = 0
+        self.items_expected = None
+        self.errors_total = 0
         self.errors_details = dict()
-        self.expected_items = None
-        self.lock = None
-        if job_info is None:
-            self.job_id = uuid()
-            self.job_conf = dict()
-            for key, value in self.conf.items():
-                if not key.startswith('job_'):
-                    continue
-                self.job_conf[key[4:]] = value
-        else:
-            self._load_job_info(job_info)
-            self.job_conf = self.backend.get_job_config(self.job_id)
+        self._parse_job_info(resume=resume)
 
-        # Parse job config
-        self._parse_job_config()
-
-        # Beanstalkd
+        # Prepare beanstalkd
         conscience_client = ConscienceClient(self.conf)
         all_available_beanstalkd = self._get_all_available_beanstalkd(
             conscience_client)
-        # Beanstalkd workers
-        beanstalkd_worker_tube = self.job_conf.get('beanstalkd_worker_tube') \
-            or self.DEFAULT_WORKER_TUBE
-        self.job_conf['beanstalkd_worker_tube'] = beanstalkd_worker_tube
+        # Prepare beanstalkd workers
         try:
             self.beanstalkd_workers = self._get_beanstalkd_workers(
-                conscience_client, all_available_beanstalkd,
-                beanstalkd_worker_tube)
+                conscience_client, all_available_beanstalkd)
         except Exception as exc:
             self.logger.error(
                 'Failed to search for beanstalkd workers: %s', exc)
             raise
         # Beanstalkd reply
-        beanstalkd_reply_tube = self.job_conf.get('beanstalkd_reply_tube') \
-            or beanstalkd_worker_tube + '.job.reply.' + self.job_id
-        self.job_conf['beanstalkd_reply_tube'] = beanstalkd_reply_tube
-        beanstalkd_reply_addr = self.job_conf.get('beanstalkd_reply_addr')
+        beanstalkd_reply_addr = self.job_info['beanstalkd_reply']['addr']
         if not beanstalkd_reply_addr:
             try:
                 beanstalkd_reply_addr = self._get_beanstalkd_reply_addr(
@@ -106,9 +87,10 @@ class XcuteJob(object):
                 self.logger.error(
                     'Failed to search for beanstalkd reply: %s', exc)
                 raise
-        self.job_conf['beanstalkd_reply_addr'] = beanstalkd_reply_addr
-        if job_info is None:
-            # If the tube exists, another service must have
+        self.job_info['beanstalkd_reply']['addr'] = beanstalkd_reply_addr
+        beanstalkd_reply_tube = self.job_info['beanstalkd_reply']['tube']
+        if not resume:
+            # If the tube exists, another job must have
             # already used this tube
             tubes = Beanstalk.from_url(
                 'beanstalk://' + beanstalkd_reply_addr).tubes()
@@ -123,32 +105,60 @@ class XcuteJob(object):
             self.beanstalkd_reply.addr, self.beanstalkd_reply.tube)
 
         # Register the job
-        mtime = time.time()
-        if job_info is None:
-            self.backend.start_job(
-                self.job_id, conf=self.job_conf, job_type=self.JOB_TYPE,
-                mtime=mtime, lock=self.lock)
+        if resume:
+            self.backend.resume_job(self.job_id, self.job_info)
         else:
-            self.backend.resume_job(self.job_id, mtime=mtime)
+            self.backend.start_job(self.job_id, self.job_info)
 
-    def _load_job_info(self, job_info):
-        if job_info['job_type'] != self.JOB_TYPE:
+    def _parse_job_info(self, resume=False):
+        job_time = self.job_info.setdefault('time', dict())
+        job_time['mtime'] = time.time()
+
+        job_job = self.job_info.setdefault('job', dict())
+        if job_job.get('type') != self.JOB_TYPE:
             raise ValueError('Wrong job type')
-        self.job_id = job_info['job_id']
-        self.last_item_sent = job_info['last_item_sent']
-        self.processed_items = int(job_info['processed_items'])
-        self.errors = int(job_info['errors'])
-        for key, value in job_info.items():
-            if not key.startswith('errors.'):
-                continue
-            self.errors_details[key[7:]] = int(value)
-        self.expected_items = job_info.get('expected_items')
-        self.lock = job_info.get('lock')
+        if resume:
+            self.job_id = job_job.get('id')
+            if not self.job_id:
+                raise ValueError('Missing job ID')
+        else:
+            self.job_id = uuid()
+            job_job['id'] = self.job_id
 
-    def _parse_job_config(self):
+        job_beanstalkd_workers = self.job_info.setdefault(
+            'beanstalkd_workers', dict())
+        beanstalkd_worker_tube = job_beanstalkd_workers.get('tube') \
+            or self.DEFAULT_WORKER_TUBE
+        job_beanstalkd_workers['tube'] = beanstalkd_worker_tube
+        job_beanstalkd_reply = self.job_info.setdefault(
+            'beanstalkd_reply', dict())
+        beanstalkd_reply_tube = job_beanstalkd_reply.get('tube') \
+            or beanstalkd_worker_tube + '.job.reply.' + self.job_id
+        job_beanstalkd_reply['tube'] = beanstalkd_reply_tube
+        beanstalkd_reply_addr = job_beanstalkd_reply.get('addr')
+        job_beanstalkd_reply['addr'] = beanstalkd_reply_addr
+
+        job_items = self.job_info.setdefault('items', dict())
+        self.items_last_sent = job_items.get('last_sent')
+        self.items_processed = int_value(job_items.get('processed'), 0)
+        job_items['processed'] = self.items_processed
+        self.items_expected = int_value(job_items.get('expected'), None)
+        job_items['expected'] = self.items_expected
+
+        job_errors = self.job_info.setdefault('errors', dict())
+        self.errors_total = int_value(job_errors.get('total'), 0)
+        job_errors['total'] = self.errors_total
+        for key, value in job_errors.items():
+            if key == 'total':
+                continue
+            self.errors_details[key] = int_value(value, 0)
+            job_errors[key] = self.errors_details[key]
+
+        job_config = self.job_info.setdefault('config', dict())
         self.max_items_per_second = int_value(
-            self.job_conf.get('items_per_second', None),
+            job_config.get('items_per_second'),
             self.DEFAULT_ITEM_PER_SECOND)
+        job_config['items_per_second'] = self.max_items_per_second
 
     def _get_all_available_beanstalkd(self, conscience_client):
         """
@@ -183,13 +193,13 @@ class XcuteJob(object):
         return available
 
     def _get_beanstalkd_workers(self, conscience_client,
-                                all_available_beanstalkd,
-                                beanstalkd_worker_tube):
+                                all_available_beanstalkd):
+        beanstalkd_workers_tube = self.job_info['beanstalkd_workers']['tube']
         beanstalkd_workers = dict()
         for beanstalkd in self._locate_tube(all_available_beanstalkd.values(),
-                                            beanstalkd_worker_tube):
+                                            beanstalkd_workers_tube):
             beanstalkd_worker = BeanstalkdSender(
-                beanstalkd['addr'], beanstalkd_worker_tube, self.logger)
+                beanstalkd['addr'], beanstalkd_workers_tube, self.logger)
             beanstalkd_workers[beanstalkd['addr']] = beanstalkd_worker
             self.logger.info(
                 'Beanstalkd %s using tube %s is selected as a worker',
@@ -262,7 +272,7 @@ class XcuteJob(object):
                 success = workers[next_worker].send_job(beanstlkd_job_data)
                 next_worker = (next_worker + 1) % nb_workers
                 if success:
-                    self.last_item_sent = item
+                    self.items_last_sent = item
                     return next_worker
             self.logger.warn("All beanstalkd workers are full")
             sleep(5)
@@ -293,21 +303,29 @@ class XcuteJob(object):
             self.sending_tasks = False
 
     def _prepare_job_info(self):
-        info = dict()
-        info['mtime'] = time.time()
-        info['last_item_sent'] = self.last_item_sent
-        info['processed_items'] = self.processed_items
-        info['errors'] = self.errors
+        job_info = {
+            'time': {
+                'mtime': time.time()
+            },
+            'items': {
+                'last_sent': self.items_last_sent,
+                'processed': self.items_processed
+            },
+            'errors': {
+                'total': self.errors_total
+            }
+        }
+        job_errors = job_info['errors']
         for err, nb in self.errors_details.items():
-            info['errors.%s' % err] = nb
-        return info
+            job_errors[err] = nb
+        return job_info
 
     def _send_job_info_periodically(self):
         try:
             while self.sending_job_info:
                 sleep(1)
-                info = self._prepare_job_info()
-                self.backend.update_job(self.job_id, **info)
+                job_info = self._prepare_job_info()
+                self.backend.update_job(self.job_id, job_info)
         except Exception as exc:
             self.logger.error("Failed to send job information: %s", exc)
             self.exit_immediately()
@@ -332,12 +350,12 @@ class XcuteJob(object):
         yield reply_info
 
     def _update_job_info(self, reply_info):
-        self.processed_items += 1
+        self.items_processed += 1
 
         exc = pickle.loads(reply_info['exc'])
         if exc:
             self.logger.warn(exc)
-            self.errors += 1
+            self.errors_total += 1
             exc_name = exc.__class__.__name__
             self.errors_details[exc_name] = self.errors_details.get(
                 exc_name, 0) + 1
@@ -386,13 +404,13 @@ class XcuteJob(object):
         # Send the last information
         self.sending_job_info = False
         info = self._prepare_job_info()
-        self.success = self.errors > 0
+        self.success = self.errors_total > 0
         thread_send_job_info_periodically.join()
         try:
             if self.running:
-                self.backend.finish_job(self.job_id, **info)
+                self.backend.finish_job(self.job_id, info)
             else:
-                self.backend.pause_job(self.job_id, **info)
+                self.backend.pause_job(self.job_id, info)
         except Exception as exc:
             self.logger.error('Failed to send the last information: %s', exc)
             self.success = False

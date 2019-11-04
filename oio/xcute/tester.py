@@ -50,19 +50,27 @@ class Tester(XcuteTask):
 class TesterJob(XcuteJob):
 
     JOB_TYPE = 'tester'
+    DEFAULT_ERROR_PERCENTAGE = 0
 
-    def _parse_job_config(self):
-        super(TesterJob, self)._parse_job_config()
-        self.lock = self.job_conf.get('lock')
+    def _parse_job_info(self, resume=False):
+        super(TesterJob, self)._parse_job_info(resume=resume)
+
+        job_config = self.job_info.setdefault('config', dict())
+        self.job_lock = job_config.get('job_lock')
         self.error_percentage = int_value(
-            self.job_conf.get('error_percentage'), 0)
+            job_config.get('error_percentage'),
+            self.DEFAULT_ERROR_PERCENTAGE)
+        job_config['error_percentage'] = self.error_percentage
+
+        job_job = self.job_info.setdefault('job', dict())
+        job_job['lock'] = self.job_lock
 
     def _get_tasks_with_args(self):
         start_index = 0
-        if self.last_item_sent is not None:
-            start_index = ITEMS.index(self.last_item_sent) + 1
+        if self.items_last_sent is not None:
+            start_index = ITEMS.index(self.items_last_sent) + 1
 
-        kwargs = {'lock': self.lock,
+        kwargs = {'lock': self.job_lock,
                   'error_percentage': self.error_percentage}
         for item in ITEMS[start_index:]:
             yield (Tester, item, kwargs)

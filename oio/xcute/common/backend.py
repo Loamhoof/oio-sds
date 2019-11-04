@@ -23,35 +23,96 @@ from oio.common.timestamp import Timestamp
 
 def handle_missing_job_id(func):
     @wraps(func)
-    def handle_missing_job_id(self, job_id, **info):
+    def handle_missing_job_id(self, job_id, *args):
         if not job_id:
             raise BadRequest(message='Missing job ID')
-        return func(self, job_id, **info)
+        return func(self, job_id, *args)
     return handle_missing_job_id
 
 
-def handle_missing_mtime(func):
+def handle_missing_update_job_info(func):
     @wraps(func)
-    def handle_missing_mtime(self, job_id, **info):
-        mtime = info.get('mtime')
-        if mtime is None:
+    def handle_missing_update_job_info(self, job_id, job_info):
+        _job_id = job_info.get('job', dict()).get('id')
+        if _job_id is not None and job_id != _job_id:
+            raise BadRequest(message='Mismatch job ID')
+        try:
+            mtime = job_info['time']['mtime']
+            if mtime is None:
+                raise KeyError()
+        except KeyError:
             raise BadRequest(message='Missing mtime')
-        info['mtime'] = Timestamp(mtime).normal
-        return func(self, job_id, **info)
-    return handle_missing_mtime
-
-
-def handle_missing_update_info(func):
-    @wraps(func)
-    def handle_missing_update_info(self, job_id, **info):
-        if info.get('last_item_sent') is None:
-            raise BadRequest(message='Missing last item sent')
-        if info.get('processed_items') is None:
+        job_info['time']['mtime'] = Timestamp(mtime).normal
+        try:
+            if job_info['items']['processed'] is None:
+                raise KeyError()
+        except KeyError:
             raise BadRequest(message='Missing number of processed items')
-        if info.get('errors') is None:
+        try:
+            if job_info['errors']['total'] is None:
+                raise KeyError()
+        except KeyError:
             raise BadRequest(message='Missing number of errors')
-        return func(self, job_id, **info)
-    return handle_missing_update_info
+        return func(self, job_id, job_info)
+    return handle_missing_update_job_info
+
+
+def _flat_dict_from_dict(dict_):
+    """
+    Create a dictionary without depth.
+
+    {
+        'depth0': {
+            'depth1': {
+                'depth2': 'test'
+            }
+        }
+    }
+    =>
+    {
+        'depth0.depth1.depth2': 'test'
+    }
+    """
+    flat_dict = dict()
+    for key, value in dict_.items():
+        if not isinstance(value, dict):
+            flat_dict[key] = value
+            continue
+
+        _flat_dict = _flat_dict_from_dict(value)
+        for _key, _value in _flat_dict.items():
+            flat_dict[key + '.' + _key] = _value
+    return flat_dict
+
+
+def _dict_from_flat_dict(dict_flat):
+    """
+    Create a dictionary with depth.
+
+    {
+        'depth0.depth1.depth2': 'test'
+    }
+    =>
+    {
+        'depth0': {
+            'depth1': {
+                'depth2': 'test'
+            }
+        }
+    }
+    """
+    dict_ = dict()
+    for key, value in dict_flat.items():
+        _key = key
+        _dict_ = dict_
+        while True:
+            _split = _key.split('.', 1)
+            if len(_split) == 1:
+                break
+            _dict_ = _dict_.setdefault(_split[0], dict())
+            _key = _split[1]
+        _dict_[_key] = value
+    return dict_
 
 
 class XcuteBackend(RedisConnection):
@@ -61,8 +122,8 @@ class XcuteBackend(RedisConnection):
                        'The job already exists'),
         'no_job': (NotFound,
                    'The job does\'nt exist'),
-        'lock_exists': (Forbidden,
-                        'The lock already exists'),
+        'lock_in_use': (Forbidden,
+                        'The lock is in use'),
         'must_be_running': (Forbidden,
                             'The job must be running'),
         'must_be_paused': (Forbidden,
@@ -71,7 +132,7 @@ class XcuteBackend(RedisConnection):
                                     'The job must be paused or finished')
         }
 
-    _lua_update_info = """
+    _lua_update_job_info = """
         redis.call('HMSET', 'xcute:job:info:' .. KEYS[1], unpack(ARGV));
         """
 
@@ -82,36 +143,36 @@ class XcuteBackend(RedisConnection):
         end;
 
         for i, v in ipairs(ARGV) do
-            if math.mod(i,2) == 1 and v == 'lock' then
+            if math.mod(i,2) == 1 and v == 'job.lock' then
                 local lock = ARGV[i+1];
-                local lock_exists = redis.call('HSETNX', 'xcute:locks',
+                local lock_in_use = redis.call('HSETNX', 'xcute:job:locks',
                                                lock, KEYS[1]);
-                if lock_exists ~= 1 then
-                    return redis.error_reply('lock_exists');
+                if lock_in_use ~= 1 then
+                    return redis.error_reply('lock_in_use');
                 end;
                 break;
             end;
         end;
 
         redis.call('HSET', 'xcute:job:info:' .. KEYS[1],
-                   'status', 'RUN');
+                   'job.status', 'RUN');
         redis.call('ZADD', 'xcute:job:ids', 0, KEYS[1]);
-        """ + _lua_update_info
+        """ + _lua_update_job_info
 
     lua_update_job = """
         local status = redis.call('HGET', 'xcute:job:info:' .. KEYS[1],
-                                  'status');
+                                  'job.status');
         if status == nil or status == false then
             return redis.error_reply('no_job');
         end;
         if status ~= 'RUN' then
             return redis.error_reply('must_be_running');
         end;
-        """ + _lua_update_info
+        """ + _lua_update_job_info
 
     lua_pause_job = """
         local status = redis.call('HGET', 'xcute:job:info:' .. KEYS[1],
-                                  'status');
+                                  'job.status');
         if status == nil or status == false then
             return redis.error_reply('no_job');
         end;
@@ -119,12 +180,13 @@ class XcuteBackend(RedisConnection):
             return redis.error_reply('must_be_running');
         end;
 
-        redis.call('HSET', 'xcute:job:info:' .. KEYS[1], 'status', 'PAUSE');
-        """ + _lua_update_info
+        redis.call('HSET', 'xcute:job:info:' .. KEYS[1], 'job.status',
+                   'PAUSE');
+        """ + _lua_update_job_info
 
     lua_resume_job = """
         local status = redis.call('HGET', 'xcute:job:info:' .. KEYS[1],
-                                  'status');
+                                  'job.status');
         if status == nil or status == false then
             return redis.error_reply('no_job');
         end;
@@ -132,12 +194,13 @@ class XcuteBackend(RedisConnection):
             return redis.error_reply('must_be_paused');
         end;
 
-        redis.call('HSET', 'xcute:job:info:' .. KEYS[1], 'status', 'RUN');
+        redis.call('HSET', 'xcute:job:info:' .. KEYS[1], 'job.status',
+                   'RUN');
         """
 
     lua_finish_job = """
         local status = redis.call('HGET', 'xcute:job:info:' .. KEYS[1],
-                                  'status');
+                                  'job.status');
         if status == nil or status == false then
             return redis.error_reply('no_job');
         end;
@@ -145,17 +208,19 @@ class XcuteBackend(RedisConnection):
             return redis.error_reply('must_be_running');
         end;
 
-        local lock = redis.call('HGET', 'xcute:job:info:' .. KEYS[1], 'lock');
+        local lock = redis.call('HGET', 'xcute:job:info:' .. KEYS[1],
+                                'job.lock');
         if lock ~= nil and lock ~= false then
-            redis.call('HDEL', 'xcute:locks', lock);
+            redis.call('HDEL', 'xcute:job:locks', lock);
         end;
 
-        redis.call('HSET', 'xcute:job:info:' .. KEYS[1], 'status', 'FINISHED');
-        """ + _lua_update_info
+        redis.call('HSET', 'xcute:job:info:' .. KEYS[1], 'job.status',
+                   'FINISHED');
+        """ + _lua_update_job_info
 
     lua_delete_job = """
         local status = redis.call('HGET', 'xcute:job:info:' .. KEYS[1],
-                                  'status');
+                                  'job.status');
         if status == nil or status == false then
             return redis.error_reply('no_job');
         end;
@@ -163,22 +228,15 @@ class XcuteBackend(RedisConnection):
             return redis.error_reply('must_be_paused_finished');
         end;
 
-        local lock = redis.call('HGET', 'xcute:job:info:' .. KEYS[1], 'lock');
+        local lock = redis.call('HGET', 'xcute:job:info:' .. KEYS[1],
+                                'job.lock');
         if lock ~= nil and lock ~= false then
-            redis.call('HDEL', 'xcute:locks', lock);
+            redis.call('HDEL', 'xcute:job:locks', lock);
         end;
 
         redis.call('ZREM', 'xcute:job:ids', KEYS[1]);
         redis.call('DEL', 'xcute:job:info:' .. KEYS[1]);
-        redis.call('DEL', 'xcute:job:config:' .. KEYS[1]);
         """
-
-    lua_set_config = """
-        redis.call('HMSET', 'xcute:job:config:' .. KEYS[1], unpack(ARGV));
-        """
-
-    lua_get_config = """
-    """
 
     def __init__(self, conf):
         self.conf = conf
@@ -198,8 +256,6 @@ class XcuteBackend(RedisConnection):
             self.lua_finish_job)
         self.script_delete_job = self.register_script(
             self.lua_delete_job)
-        self.script_set_config = self.register_script(
-            self.lua_set_config)
 
     def list_jobs(self, marker=None, limit=1000):
         jobs = list()
@@ -224,10 +280,7 @@ class XcuteBackend(RedisConnection):
             for job_id in job_ids:
                 if not res[i]:
                     continue
-                info = dict()
-                info['job_id'] = job_id
-                info.update(res[i])
-                jobs.append(info)
+                jobs.append(_dict_from_flat_dict(res[i]))
                 i += 1
 
             if len(job_ids) < limit_:
@@ -236,36 +289,25 @@ class XcuteBackend(RedisConnection):
 
     @handle_missing_job_id
     def get_job_info(self, job_id):
-        info = self.conn.hgetall('xcute:job:info:%s' % job_id)
-        if not info:
+        job_info = self.conn.hgetall('xcute:job:info:%s' % job_id)
+        if not job_info:
             raise NotFound(message='Job %s doest\'nt exist' % job_id)
-        info['job_id'] = job_id
-        info['expected_items'] = info.get('expected_items')
-        info['last_item_sent'] = info.get('last_item_sent')
-        return info
-
-    @handle_missing_job_id
-    def get_job_config(self, job_id):
-        conf = self.conn.hgetall('xcute:job:config:%s' % job_id)
-        if not conf:
-            raise NotFound(message='Job %s doest\'nt exist' % job_id)
-        return conf
+        return _dict_from_flat_dict(job_info)
 
     def get_locks(self):
-        return self.conn.hgetall('xcute:locks')
+        return self.conn.hgetall('xcute:job:locks')
 
-    def _run_script(self, job_id, script, client=None, **info):
-        client = client or self.conn
-
+    def _run_script(self, job_id, job_info, script):
         script_args = list()
-        for key, value in info.items():
-            if value is None:
-                continue
-            script_args.append(key)
-            script_args.append(value)
+        if job_info:
+            for key, value in _flat_dict_from_dict(job_info).items():
+                if value is None:
+                    continue
+                script_args.append(key)
+                script_args.append(value)
 
         try:
-            return script(keys=[job_id], args=script_args, client=client)
+            return script(keys=[job_id], args=script_args, client=self.conn)
         except redis.exceptions.ResponseError as exc:
             error = self._lua_errors.get(str(exc))
             if error is None:
@@ -274,54 +316,36 @@ class XcuteBackend(RedisConnection):
             raise error_cls(message=error_msg)
 
     @handle_missing_job_id
-    @handle_missing_mtime
-    def start_job(self, job_id, conf=None, **info):
-        if conf is None:
-            raise BadRequest(message='Missing configuration')
-        if info.get('job_type') is None:
+    @handle_missing_update_job_info
+    def start_job(self, job_id, job_info):
+        try:
+            if job_info['job']['type'] is None:
+                raise KeyError()
+        except KeyError:
             raise BadRequest(message='Missing job type')
+        job_info['time']['ctime'] = job_info['time']['mtime']
 
-        info['ctime'] = info.get('mtime')
-        info['processed_items'] = 0
-        info['errors'] = 0
-
-        script_args_conf = list()
-        for key, value in conf.items():
-            if value is None:
-                continue
-            script_args_conf.append(key)
-            script_args_conf.append(value)
-
-        pipeline = self.conn.pipeline()
-        self._run_script(
-            job_id, self.script_start_job, client=pipeline, **info)
-        self.script_set_config(
-            keys=[job_id], args=script_args_conf, client=pipeline)
-        pipeline.execute()
+        self._run_script(job_id, job_info, self.script_start_job)
 
     @handle_missing_job_id
-    @handle_missing_mtime
-    @handle_missing_update_info
-    def update_job(self, job_id, **info):
-        self._run_script(job_id, self.script_update_job, **info)
+    @handle_missing_update_job_info
+    def update_job(self, job_id, job_info):
+        self._run_script(job_id, job_info, self.script_update_job)
 
     @handle_missing_job_id
-    @handle_missing_mtime
-    @handle_missing_update_info
-    def pause_job(self, job_id, **info):
-        self._run_script(job_id, self.script_pause_job, **info)
+    @handle_missing_update_job_info
+    def pause_job(self, job_id, job_info):
+        self._run_script(job_id, job_info, self.script_pause_job)
 
     @handle_missing_job_id
-    @handle_missing_mtime
-    def resume_job(self, job_id, **info):
-        self._run_script(job_id, self.script_resume_job, **info)
+    def resume_job(self, job_id, job_info):
+        self._run_script(job_id, job_info, self.script_resume_job)
 
     @handle_missing_job_id
-    @handle_missing_mtime
-    @handle_missing_update_info
-    def finish_job(self, job_id, **info):
-        self._run_script(job_id, self.script_finish_job, **info)
+    @handle_missing_update_job_info
+    def finish_job(self, job_id, job_info):
+        self._run_script(job_id, job_info, self.script_finish_job)
 
     @handle_missing_job_id
-    def delete_job(self, job_id, **info):
-        self._run_script(job_id, self.script_delete_job)
+    def delete_job(self, job_id):
+        self._run_script(job_id, None, self.script_delete_job)

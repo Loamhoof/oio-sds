@@ -13,6 +13,7 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.
 
+from oio.common.logger import get_logger
 from oio.xcute.common.backend import XcuteBackend
 from oio.xcute.blob_mover import RawxDecommissionJob
 from oio.xcute.tester import TesterJob
@@ -25,38 +26,31 @@ class XcuteManager(object):
         TesterJob.JOB_TYPE: TesterJob
     }
 
-    def __init__(self):
+    def __init__(self, logger=None):
         self.conf = dict()
         # TODO(adu): Remove this
         self.conf['redis_host'] = '127.0.0.1:6379'
         self.conf['namespace'] = 'OPENIO'
+        self.logger = logger or get_logger(self.conf)
         self.backend = XcuteBackend(self.conf)
 
-    def create_job(self, job_type, conf, logger=None):
-        job_class = self.JOB_TYPES.get(job_type)
-        if job_class is None:
+    def create_job(self, job_info):
+        try:
+            job_class = self.JOB_TYPES[job_info['job']['type']]
+        except KeyError:
             raise ValueError('Job type unknown')
 
-        conf_ = self.conf.copy()
-        for key, value in conf:
-            if value is None:
-                continue
-            conf_[key] = value
+        return job_class(self.conf, job_info, logger=self.logger)
 
-        job = job_class(conf_, logger=logger)
-        return job
-
-    def resume_job(self, job_id, logger=None):
+    def resume_job(self, job_id):
         job_info = self.backend.get_job_info(job_id)
 
-        job_class = self.JOB_TYPES.get(job_info['job_type'])
-        if job_class is None:
+        try:
+            job_class = self.JOB_TYPES[job_info['job']['type']]
+        except KeyError:
             raise ValueError('Job type unknown')
 
-        conf_ = self.conf.copy()
-
-        job = job_class(conf_, job_info=job_info, logger=logger)
-        return job
+        return job_class(self.conf, job_info, resume=True, logger=self.logger)
 
     def list_jobs(self):
         return self.backend.list_jobs()
