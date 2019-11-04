@@ -83,7 +83,7 @@ class XcuteWorker(object):
             res = task.process(task_item, reqid=reqid, **task_kwargs)
             exc = None
         except Exception as exc:
-            self.logger.exception(exc)
+            self.logger.error(exc)
             res = None
 
         if exc:

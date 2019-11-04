@@ -129,10 +129,10 @@ class RawxDecommissionJob(XcuteJob):
             self.service_id, limit=self.rdir_fetch_limit,
             timeout=self.rdir_timeout, start_after=self.last_item_sent)
 
+        kwargs = {'rawx_timeout': self.rawx_timeout,
+                  'min_chunk_size': self.min_chunk_size,
+                  'max_chunk_size': self.max_chunk_size,
+                  'excluded_rawx': self.excluded_rawx}
         for _, _, chunk_id, _ in chunks_info:
-            yield (BlobMover,
-                   '/'.join(('http:/', self.service_id, chunk_id)),
-                   {'rawx_timeout': self.rawx_timeout,
-                    'min_chunk_size': self.min_chunk_size,
-                    'max_chunk_size': self.max_chunk_size,
-                    'excluded_rawx': self.excluded_rawx})
+            yield (BlobMover, '/'.join(('http:/', self.service_id, chunk_id)),
+                   kwargs)

@@ -17,6 +17,7 @@ def make_arg_parser():
 
     parser.add_argument('namespace', help="Namespace")
     parser.add_argument('--lock', help='Name of the lock')
+    parser.add_argument('--error-percentage', help='Error percentage')
 
     return parser
 
@@ -29,6 +30,7 @@ if __name__ == '__main__':
     conf['redis_host'] = '127.0.0.1:6379'
     conf['job_test'] = 'job_config'
     conf['job_lock'] = args.lock
+    conf['job_error_percentage'] = args.error_percentage
 
     job = TesterJob(conf, logger=logger)
 

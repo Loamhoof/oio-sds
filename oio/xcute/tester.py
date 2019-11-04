@@ -13,8 +13,23 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.
 
+import random
+
+import oio.common.exceptions as exc
+from oio.common.easy_value import int_value
 from oio.xcute.common.job import XcuteJob
 from oio.xcute.common.task import XcuteTask
+
+
+EXCEPTIONS = [exc.BadRequest,
+              exc.Forbidden,
+              exc.NotFound,
+              exc.MethodNotAllowed,
+              exc.Conflict,
+              exc.ClientPreconditionFailed,
+              exc.TooLarge,
+              exc.UnsatisfiableRange,
+              exc.ServiceBusy]
 
 
 ITEMS = list()
@@ -24,7 +39,10 @@ for i in range(1000):
 
 class Tester(XcuteTask):
 
-    def process(self, item, **kwargs):
+    def process(self, item, error_percentage=None, **kwargs):
+        if error_percentage and random.randrange(100) < error_percentage:
+            exc_class = random.choice(EXCEPTIONS)
+            raise exc_class()
         self.logger.error('It works (item=%s ; kwargs=%s) !!!',
                           item, str(kwargs))
 
@@ -36,10 +54,15 @@ class TesterJob(XcuteJob):
     def _parse_job_config(self):
         super(TesterJob, self)._parse_job_config()
         self.lock = self.job_conf.get('lock')
+        self.error_percentage = int_value(
+            self.job_conf.get('error_percentage'), 0)
 
     def _get_tasks_with_args(self):
         start_index = 0
         if self.last_item_sent is not None:
             start_index = ITEMS.index(self.last_item_sent) + 1
+
+        kwargs = {'lock': self.lock,
+                  'error_percentage': self.error_percentage}
         for item in ITEMS[start_index:]:
-            yield (Tester, item, self.job_conf)
+            yield (Tester, item, kwargs)

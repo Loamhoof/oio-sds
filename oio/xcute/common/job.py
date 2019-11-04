@@ -58,6 +58,7 @@ class XcuteJob(object):
         self.last_item_sent = None
         self.processed_items = 0
         self.errors = 0
+        self.errors_details = dict()
         self.expected_items = None
         self.lock = None
         if job_info is None:
@@ -136,6 +137,10 @@ class XcuteJob(object):
         self.last_item_sent = job_info['last_item_sent']
         self.processed_items = int(job_info['processed_items'])
         self.errors = int(job_info['errors'])
+        for key, value in job_info.items():
+            if not key.startswith('errors.'):
+                continue
+            self.errors_details[key[7:]] = int(value)
         self.expected_items = job_info.get('expected_items')
         self.lock = job_info.get('lock')
 
@@ -285,6 +290,8 @@ class XcuteJob(object):
         info['last_item_sent'] = self.last_item_sent
         info['processed_items'] = self.processed_items
         info['errors'] = self.errors
+        for err, nb in self.errors_details.items():
+            info['errors.%s' % err] = nb
         return info
 
     def _send_job_info_periodically(self):
@@ -317,8 +324,11 @@ class XcuteJob(object):
 
         exc = pickle.loads(reply_info['exc'])
         if exc:
-            self.logger.error(exc)
+            self.logger.warn(exc)
             self.errors += 1
+            exc_name = exc.__class__.__name__
+            self.errors_details[exc_name] = self.errors_details.get(
+                exc_name, 0) + 1
 
     def _process_reply(self, reply_info):
         self._update_job_info(reply_info)
