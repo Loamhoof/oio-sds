@@ -50,7 +50,7 @@ class BlobMover(XcuteTask):
         return fake_excluded_chunks
 
     def process(self, chunk_url, rawx_timeout=None, min_chunk_size=None,
-                max_chunk_size=None, excluded_rawx=None):
+                max_chunk_size=None, excluded_rawx=None, **kwargs):
         min_chunk_size = min_chunk_size \
             or RawxDecommissionJob.DEFAULT_MIN_CHUNK_SIZE
         max_chunk_size = max_chunk_size \
@@ -61,7 +61,8 @@ class BlobMover(XcuteTask):
         fake_excluded_chunks = self._generate_fake_excluded_chunks(
             excluded_rawx)
 
-        meta = self.blob_client.chunk_head(chunk_url, timeout=rawx_timeout)
+        meta = self.blob_client.chunk_head(chunk_url, timeout=rawx_timeout,
+                                           **kwargs)
         container_id = meta['container_id']
         content_id = meta['content_id']
         chunk_id = meta['chunk_id']
@@ -77,12 +78,13 @@ class BlobMover(XcuteTask):
 
         # Start moving the chunk
         try:
-            content = self.content_factory.get(container_id, content_id)
+            content = self.content_factory.get(container_id, content_id,
+                                               **kwargs)
         except ContentNotFound:
             raise OrphanChunk('Content not found')
 
         new_chunk = content.move_chunk(
-            chunk_id, fake_excluded_chunks=fake_excluded_chunks)
+            chunk_id, fake_excluded_chunks=fake_excluded_chunks, **kwargs)
 
         self.logger.info('Moved chunk %s to %s', chunk_url, new_chunk['url'])
 

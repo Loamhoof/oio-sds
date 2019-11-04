@@ -17,6 +17,7 @@ import pickle
 
 from oio.common.green import sleep
 from oio.common.json import json
+from oio.common.utils import request_id
 from oio.event.beanstalk import BeanstalkdSender
 from oio.xcute.common.task import XcuteTask
 
@@ -64,6 +65,7 @@ class XcuteWorker(object):
     def process_job(self, beanstalkd_job):
         try:
             # Decode the beanstakd job
+            job_id = beanstalkd_job['job_id']
             task_class_encoded = beanstalkd_job['task']
 
             task_class = pickle.loads(task_class_encoded)
@@ -76,9 +78,12 @@ class XcuteWorker(object):
             task_kwargs = beanstalkd_job.get('kwargs', dict())
 
             # Execute the task
-            res = task.process(task_item, **task_kwargs)
+            date, rand = job_id.split('-')
+            reqid = date + '-' + request_id(prefix=rand+'-')
+            res = task.process(task_item, reqid=reqid, **task_kwargs)
             exc = None
         except Exception as exc:
+            self.logger.exception(exc)
             res = None
 
         if exc:
