@@ -48,7 +48,9 @@ class XcuteJob(object):
         self.logger = logger or get_logger(self.conf)
         self.running = True
         self.success = True
-        self.sending = None
+        self.sending_tasks = None
+        self.sending_job_info = True
+        self.wait_results = True
 
         # Prepare backend
         self.backend = XcuteBackend(self.conf)
@@ -89,7 +91,7 @@ class XcuteJob(object):
                 beanstalkd_worker_tube)
         except Exception as exc:
             self.logger.error(
-                'ERROR when searching for beanstalkd workers: %s', exc)
+                'Failed to search for beanstalkd workers: %s', exc)
             raise
         # Beanstalkd reply
         beanstalkd_reply_tube = self.job_conf.get('beanstalkd_reply_tube') \
@@ -102,7 +104,7 @@ class XcuteJob(object):
                     conscience_client, all_available_beanstalkd)
             except Exception as exc:
                 self.logger.error(
-                    'ERROR when searching for beanstalkd reply: %s', exc)
+                    'Failed to search for beanstalkd reply: %s', exc)
                 raise
         self.job_conf['beanstalkd_reply_addr'] = beanstalkd_reply_addr
         if job_info is None:
@@ -128,7 +130,6 @@ class XcuteJob(object):
                 mtime=mtime, lock=self.lock)
         else:
             self.backend.resume_job(self.job_id, mtime=mtime)
-        self.sending_job_info = True
 
     def _load_job_info(self, job_info):
         if job_info['job_type'] != self.JOB_TYPE:
@@ -222,9 +223,16 @@ class XcuteJob(object):
         return beanstalkd['addr']
 
     def exit_gracefully(self):
-        self.logger.info('Stop sending and wait for all tasks already sent')
+        self.logger.warn('Stop sending and wait for all tasks already sent')
         self.success = False
         self.running = False
+
+    def exit_immediately(self):
+        self.logger.warn(
+            'Stop sending and not wait for all tasks already sent')
+        self.success = False
+        self.running = False
+        self.wait_results = False
 
     def _get_tasks_with_args(self):
         raise NotImplementedError()
@@ -269,7 +277,7 @@ class XcuteJob(object):
                 items_run_time, self.max_items_per_second)
             next_worker = self._send_task(
                 next(tasks_with_args), next_worker)
-            self.sending = True
+            self.sending_tasks = True
             for task_with_args in tasks_with_args:
                 items_run_time = ratelimit(items_run_time,
                                            self.max_items_per_second)
@@ -280,9 +288,9 @@ class XcuteJob(object):
         except Exception as exc:
             if not isinstance(exc, StopIteration) and self.running:
                 self.logger.error("Failed to distribute tasks: %s", exc)
-                self.success = False
+                self.exit_gracefully()
         finally:
-            self.sending = False
+            self.sending_tasks = False
 
     def _prepare_job_info(self):
         info = dict()
@@ -295,16 +303,20 @@ class XcuteJob(object):
         return info
 
     def _send_job_info_periodically(self):
-        while self.sending_job_info:
-            sleep(1)
-            info = self._prepare_job_info()
-            self.backend.update_job(self.job_id, **info)
+        try:
+            while self.sending_job_info:
+                sleep(1)
+                info = self._prepare_job_info()
+                self.backend.update_job(self.job_id, **info)
+        except Exception as exc:
+            self.logger.error("Failed to send job information: %s", exc)
+            self.exit_immediately()
 
     def _all_tasks_are_processed(self):
         """
         Tell if all workers have finished to process their tasks.
         """
-        if self.sending:
+        if self.sending_tasks:
             return False
 
         total_tasks = 0
@@ -342,36 +354,45 @@ class XcuteJob(object):
         thread_distribute_tasks.start()
 
         # Wait until the thread is started sending events
-        while self.sending is None:
+        while self.sending_tasks is None:
             sleep(0.1)
 
-        self.sending_job_info = True
         thread_send_job_info_periodically = threading.Thread(
             target=self._send_job_info_periodically)
         thread_send_job_info_periodically.start()
 
         # Retrieve replies until all events are processed
         try:
-            while not self._all_tasks_are_processed():
-                replies = self.beanstalkd_reply.fetch_job(
-                    self._decode_reply,
-                    timeout=self.DEFAULT_DISPATCHER_TIMEOUT)
-                for reply in replies:
-                    self._process_reply(reply)
-        except OioTimeout:
-            self.logger.error('No reply for %d seconds',
-                              self.DEFAULT_DISPATCHER_TIMEOUT)
-            self.success = False
-        except Exception:
-            self.logger.exception('ERROR in distributed dispatcher')
-            self.success = False
+            while self.wait_results and not self._all_tasks_are_processed():
+                for _ in range(self.DEFAULT_DISPATCHER_TIMEOUT):
+                    if not self.wait_results:
+                        break
+
+                    try:
+                        replies = self.beanstalkd_reply.fetch_job(
+                            self._decode_reply, timeout=1)
+                        for reply in replies:
+                            self._process_reply(reply)
+                        break
+                    except OioTimeout:
+                        pass
+                else:
+                    raise OioTimeout('No reply for %d seconds' %
+                                     self.DEFAULT_DISPATCHER_TIMEOUT)
+        except Exception as exc:
+            self.logger.error('Failed to fetch task results: %s', exc)
+            self.exit_immediately()
 
         # Send the last information
         self.sending_job_info = False
         info = self._prepare_job_info()
         self.success = self.errors > 0
         thread_send_job_info_periodically.join()
-        if self.running:
-            self.backend.finish_job(self.job_id, **info)
-        else:
-            self.backend.pause_job(self.job_id, **info)
+        try:
+            if self.running:
+                self.backend.finish_job(self.job_id, **info)
+            else:
+                self.backend.pause_job(self.job_id, **info)
+        except Exception as exc:
+            self.logger.error('Failed to send the last information: %s', exc)
+            self.success = False
