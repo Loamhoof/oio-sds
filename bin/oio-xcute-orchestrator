@@ -6,7 +6,7 @@ import signal
 from optparse import OptionParser
 
 from oio.common.configuration import parse_options, read_conf
-from oio.xcute.orchestrator import XcuteOrchestrator
+from oio.xcute.common.orchestrator import XcuteOrchestrator
 
 
 if __name__ == '__main__':
@@ -16,7 +16,7 @@ if __name__ == '__main__':
 
     orchestrator = XcuteOrchestrator(conf, verbose=options['verbose'])
 
-    signal.signal(signal.SIGINT, orchestrator.exit)
-    signal.signal(signal.SIGTERM, orchestrator.exit)
+    signal.signal(signal.SIGINT, orchestrator.exit_gracefully)
+    signal.signal(signal.SIGTERM, orchestrator.exit_gracefully)
 
     orchestrator.run_forever()

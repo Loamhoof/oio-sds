@@ -21,7 +21,7 @@ from optparse import OptionParser
 
 from oio.common.configuration import parse_options, read_conf
 from oio.common.wsgi import Application, ServiceLogger
-from oio.xcute.server import create_app
+from oio.xcute.common.server import create_app
 
 
 if __name__ == '__main__':

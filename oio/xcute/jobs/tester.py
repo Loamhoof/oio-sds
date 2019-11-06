@@ -13,26 +13,64 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.
 
+import random
+
+import oio.common.exceptions as exc
+from oio.common.easy_value import int_value
+from oio.xcute.common.job import XcuteJob
 from oio.xcute.common.task import XcuteTask
 
 
-class TesterFirstTask(XcuteTask):
-
-    def process(self, payload):
-        self.logger.info('First task: %s', payload['msg'])
-        return True
-
-
-class TesterSecondTask(XcuteTask):
-
-    def process(self, payload):
-        self.logger.info('Second task: %s', payload['msg'])
-        return True
+EXCEPTIONS = [exc.BadRequest,
+              exc.Forbidden,
+              exc.NotFound,
+              exc.MethodNotAllowed,
+              exc.Conflict,
+              exc.ClientPreconditionFailed,
+              exc.TooLarge,
+              exc.UnsatisfiableRange,
+              exc.ServiceBusy]
 
 
-def tester_job(job_conf, marker=0, **kwargs):
-    for i in range(marker + 1, 5):
-        if i < 2:
-            yield (TesterFirstTask, {'msg': 'coucou-%d' % i}, None)
-        else:
-            yield (TesterSecondTask, {'msg': 'hibou-%d' % i}, 4)
+ITEMS = list()
+for i in range(1000):
+    ITEMS.append('myitem-' + str(i))
+
+
+class Tester(XcuteTask):
+
+    def process(self, item, error_percentage=None, **kwargs):
+        if error_percentage and random.randrange(100) < error_percentage:
+            exc_class = random.choice(EXCEPTIONS)
+            raise exc_class()
+        self.logger.error('It works (item=%s ; kwargs=%s) !!!',
+                          item, str(kwargs))
+
+
+class TesterJob(XcuteJob):
+
+    JOB_TYPE = 'tester'
+    DEFAULT_ERROR_PERCENTAGE = 0
+
+    def _parse_job_info(self, create=False):
+        super(TesterJob, self)._parse_job_info(create=create)
+
+        job_config = self.job_info.setdefault('config', dict())
+        self.job_lock = job_config.get('job_lock')
+        self.error_percentage = int_value(
+            job_config.get('error_percentage'),
+            self.DEFAULT_ERROR_PERCENTAGE)
+        job_config['error_percentage'] = self.error_percentage
+
+        job_job = self.job_info.setdefault('job', dict())
+        job_job['lock'] = self.job_lock
+
+    def _get_tasks_with_args(self):
+        start_index = 0
+        if self.items_last_sent is not None:
+            start_index = ITEMS.index(self.items_last_sent) + 1
+
+        kwargs = {'lock': self.job_lock,
+                  'error_percentage': self.error_percentage}
+        for item in ITEMS[start_index:]:
+            yield (Tester, item, kwargs)

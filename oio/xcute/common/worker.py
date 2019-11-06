@@ -14,7 +14,6 @@
 # License along with this library.
 
 import pickle
-import traceback
 
 from oio.common.green import sleep
 from oio.common.json import json
@@ -29,55 +28,67 @@ class XcuteWorker(object):
                  logger):
         self.beanstalkd_worker_addr = beanstalkd_worker_addr
         self.beanstalkd_worker_tube = beanstalkd_worker_tube
-        self.beanstalkd_senders = {}
+        self.beanstalkd_reply = None
         self.conf = conf
         self.logger = logger
 
-    def process_beanstalkd_job(self, beanstalkd_job):
-        job_id = beanstalkd_job['job_id']
-        task_id = beanstalkd_job['task_id']
-        task_class_encoded = beanstalkd_job['task_class']
-        task_payload_encoded = beanstalkd_job['task_payload']
-        reply_addr = beanstalkd_job['beanstalkd_reply']['addr']
-        reply_tube = beanstalkd_job['beanstalkd_reply']['tube']
+    def _reply(self, beanstalkd_job, res, exc):
+        reply_dest = beanstalkd_job.get('beanstalkd_reply')
+        if not reply_dest:
+            return
+
+        beanstalkd_job['beanstalkd_worker'] = {
+            'addr': self.beanstalkd_worker_addr,
+            'tube': self.beanstalkd_worker_tube}
+        beanstalkd_job['res'] = pickle.dumps(res)
+        beanstalkd_job['exc'] = pickle.dumps(exc)
+        beanstalkd_job_data = json.dumps(beanstalkd_job)
 
         try:
+            if self.beanstalkd_reply is None \
+                    or self.beanstalkd_reply.addr != reply_dest['addr'] \
+                    or self.beanstalkd_reply.tube != reply_dest['tube']:
+                if self.beanstalkd_reply is not None:
+                    self.beanstalkd_reply.close()
+                self.beanstalkd_reply = BeanstalkdSender(
+                    reply_dest['addr'], reply_dest['tube'], self.logger)
+
+            sent = False
+            while not sent:
+                sent = self.beanstalkd_reply.send_job(beanstalkd_job_data)
+                if not sent:
+                    sleep(1.0)
+            self.beanstalkd_reply.job_done()
+        except Exception as exc:
+            self.logger.warn('Fail to reply %s: %s', str(beanstalkd_job), exc)
+
+    def process_job(self, beanstalkd_job):
+        try:
+            # Decode the beanstakd job
+            job_id = beanstalkd_job['job_id']
+            task_class_encoded = beanstalkd_job['task']
+
             task_class = pickle.loads(task_class_encoded)
-            task_payload = pickle.loads(task_payload_encoded)
             task = task_class(self.conf, self.logger)
 
             if not isinstance(task, XcuteTask):
                 raise ValueError('Unexpected task: %s' % task_class)
 
-            task_ok = self._execute_task(task, task_payload)
-        except Exception:
-            self.logger.error('Error processing job %s: %s',
-                              beanstalkd_job, traceback.format_exc())
-            task_ok = False
+            task_item = beanstalkd_job['item']
+            task_kwargs = beanstalkd_job.get('kwargs', dict())
 
-        self._reply(reply_addr, reply_tube, job_id, task_id, task_ok)
+            # Execute the task
+            date, rand = job_id.split('-')
+            reqid = date + '-' + request_id(prefix=rand+'-')
+            res = task.process(task_item, reqid=reqid, **task_kwargs)
+            exc = None
+        except Exception as exc:
+            self.logger.error(exc)
+            res = None
 
-    @staticmethod
-    def _execute_task(task, task_payload):
-        return task.process(task_payload)
+        if exc:
+            self.logger.error('Error to process job %s: %s',
+                              str(beanstalkd_job), exc)
 
-    def _reply(self, reply_addr, reply_tube, job_id, task_id, task_ok):
-        reply_payload = json.dumps({
-            'job_id': job_id,
-            'task_id': task_id,
-            'task_ok': task_ok,
-        })
-
-        sender_key = (reply_addr, reply_tube)
-        if sender_key not in self.beanstalkd_senders:
-            self.beanstalkd_senders[sender_key] = BeanstalkdSender(
-                addr=reply_addr,
-                tube=reply_tube,
-                logger=self.logger)
-
-        beanstalkd_sender = self.beanstalkd_senders[(reply_addr, reply_tube)]
-
-        while not beanstalkd_sender.send_job(reply_payload):
-            sleep(1)
-
-        beanstalkd_sender.job_done()
+        # Reply
+        self._reply(beanstalkd_job, res, exc)

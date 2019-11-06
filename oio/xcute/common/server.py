@@ -1,3 +1,18 @@
+# Copyright (C) 2019 OpenIO SAS, as part of OpenIO SDS
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 3.0 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library.
+
 from werkzeug.exceptions import BadRequest as HTTPBadRequest
 from werkzeug.exceptions import NotFound as HTTPNotFound
 from werkzeug.routing import Map, Rule, Submount
@@ -7,15 +22,15 @@ from oio.common.exceptions import NotFound
 from oio.common.json import json
 from oio.common.logger import get_logger
 from oio.common.wsgi import WerkzeugApp
-from oio.xcute.common.exceptions import UnknownJobTypeException
-from oio.xcute.common.manager import XcuteManager
+from oio.xcute.common.backend import XcuteBackend
+from oio.xcute.jobs import get_job_class
 
 
-class Xcute(WerkzeugApp):
-    def __init__(self, conf, manager, logger=None):
+class XcuteServer(WerkzeugApp):
+    def __init__(self, conf, backend, logger=None):
         self.conf = conf
-        self.manager = manager
-        self.logger = logger
+        self.backend = backend
+        self.logger = logger or get_logger(self.conf)
 
         url_map = Map([
             Submount('/v1.0/xcute', [
@@ -30,40 +45,40 @@ class Xcute(WerkzeugApp):
             ])
         ])
 
-        super(Xcute, self).__init__(url_map, logger)
+        super(XcuteServer, self).__init__(url_map, logger)
 
     def on_job_list(self, req):
         if req.method == 'GET':
             limit = int(req.args.get('limit', '1000'))
             marker = req.args.get('marker', '')
-            jobs = self.manager.list_jobs(limit=limit, marker=marker)
+            jobs = self.backend.list_jobs(limit=limit, marker=marker)
 
             return Response(json.dumps(jobs), mimetype='application/json')
 
         if req.method == 'POST':
             try:
-                data = json.loads(req.data)
+                job_info = json.loads(req.data)
 
-                job_type = data['type']
-                job_conf = data.get('conf')
-
-                job = self.manager.create_job(job_type, job_conf)
-            except UnknownJobTypeException as e:
+                job_class = get_job_class(job_info)
+                job = job_class(self.conf, None, job_info,
+                                create=True, logger=self.logger)
+                self.backend.create_job(job.job_id, job.job_info)
+            except ValueError as e:
                 return HTTPBadRequest(e.message)
 
-            return Response(json.dumps(job), status=202)
+            return Response(json.dumps(job.job_info), status=202)
 
     def on_job(self, req, job_id):
         if req.method == 'GET':
             try:
-                job = self.manager.show_job(job_id)
+                job = self.backend.show_job(job_id)
             except NotFound as e:
                 return HTTPNotFound(e.message)
 
             return Response(json.dumps(job), mimetype='application/json')
 
         if req.method == 'DELETE':
-            self.manager.delete_job(job_id)
+            self.backend.delete_job(job_id)
 
             return Response(status=204)
 
@@ -80,7 +95,7 @@ class Xcute(WerkzeugApp):
 
 def create_app(conf):
     logger = get_logger(conf)
-    manager = XcuteManager(conf, logger)
-    app = Xcute(conf, manager, logger)
+    backend = XcuteBackend(conf, logger=logger)
+    app = XcuteServer(conf, backend, logger=logger)
 
     return app

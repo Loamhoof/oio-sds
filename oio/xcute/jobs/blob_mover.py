@@ -99,14 +99,14 @@ class RawxDecommissionJob(XcuteJob):
     DEFAULT_MAX_CHUNK_SIZE = 0
     DEFAULT_EXCLUDED_RAWX = list()
 
-    def __init__(self, conf, job_info, resume=False, logger=None):
+    def __init__(self, conf, job_info, create=False, logger=None):
         super(RawxDecommissionJob, self).__init__(
-            conf, job_info, resume=resume, logger=logger)
+            conf, job_info, create=create, logger=logger)
 
         self.rdir_client = RdirClient(self.conf, logger=self.logger)
 
-    def _parse_job_info(self, resume=False):
-        super(RawxDecommissionJob, self)._parse_job_info(resume=resume)
+    def _parse_job_info(self, create=False):
+        super(RawxDecommissionJob, self)._parse_job_info(create=create)
 
         job_config = self.job_info.setdefault('config', dict())
         self.service_id = job_config.get('service_id')
